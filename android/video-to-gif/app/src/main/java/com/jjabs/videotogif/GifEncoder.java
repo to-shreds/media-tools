@@ -13,23 +13,28 @@ import java.util.Map;
 
 final class GifEncoder {
     private static final int MAX_COLORS = 256;
+    private static final int TRANSPARENT_INDEX = 255;
     private static final int MAX_PALETTE_SAMPLES = 24000;
 
     private final OutputStream out;
     private final int width;
     private final int height;
-    private final int delayCs;
+    private final int defaultDelayCs;
     private boolean finished;
 
     GifEncoder(OutputStream out, int width, int height, int delayCs) throws IOException {
         this.out = out;
         this.width = width;
         this.height = height;
-        this.delayCs = Math.max(1, delayCs);
+        this.defaultDelayCs = Math.max(1, delayCs);
         writeHeader();
     }
 
     void addFrame(Bitmap bitmap) throws IOException {
+        addFrame(bitmap, defaultDelayCs);
+    }
+
+    void addFrame(Bitmap bitmap, int delayCs) throws IOException {
         if (finished) {
             throw new IllegalStateException("Encoder is already finished");
         }
@@ -42,7 +47,7 @@ final class GifEncoder {
 
         QuantizedFrame frame = quantize(pixels);
 
-        writeGraphicControlExtension();
+        writeGraphicControlExtension(Math.max(1, delayCs), frame.hasTransparency);
         writeImageDescriptor();
         writePalette(frame.palette);
 
@@ -80,13 +85,16 @@ final class GifEncoder {
         out.write(0);
     }
 
-    private void writeGraphicControlExtension() throws IOException {
+    private void writeGraphicControlExtension(int delayCs, boolean transparent) throws IOException {
         out.write(0x21);
         out.write(0xF9);
         out.write(4);
-        out.write(0);
+
+        // Disposal 1 leaves the rendered frame in place for normal full-frame
+        // animation. Bit 0 enables transparency when needed.
+        out.write(transparent ? 0x05 : 0x04);
         writeShort(delayCs);
-        out.write(0);
+        out.write(transparent ? TRANSPARENT_INDEX : 0);
         out.write(0);
     }
 
@@ -111,14 +119,40 @@ final class GifEncoder {
     }
 
     private QuantizedFrame quantize(int[] pixels) {
-        int total = pixels.length;
-        int sampleStep = Math.max(1, (int) Math.ceil(total / (double) MAX_PALETTE_SAMPLES));
-        int sampleCount = (total + sampleStep - 1) / sampleStep;
+        boolean hasTransparency = false;
+        int opaqueCount = 0;
+
+        for (int c : pixels) {
+            if (((c >>> 24) & 0xFF) < 128) {
+                hasTransparency = true;
+            } else {
+                opaqueCount++;
+            }
+        }
+
+        int maxOpaqueColors = hasTransparency ? MAX_COLORS - 1 : MAX_COLORS;
+        int sampleStep = Math.max(
+                1,
+                (int) Math.ceil(Math.max(1, opaqueCount) / (double) MAX_PALETTE_SAMPLES));
+        int sampleCount = Math.max(1, (opaqueCount + sampleStep - 1) / sampleStep);
         int[] samples = new int[sampleCount];
 
+        int seenOpaque = 0;
         int sampleIndex = 0;
-        for (int i = 0; i < total; i += sampleStep) {
-            samples[sampleIndex++] = pixels[i] & 0x00FFFFFF;
+
+        for (int c : pixels) {
+            if (((c >>> 24) & 0xFF) < 128) {
+                continue;
+            }
+
+            if ((seenOpaque++ % sampleStep) == 0 && sampleIndex < samples.length) {
+                samples[sampleIndex++] = c & 0x00FFFFFF;
+            }
+        }
+
+        if (sampleIndex == 0) {
+            samples[0] = 0;
+            sampleIndex = 1;
         }
 
         if (sampleIndex != samples.length) {
@@ -128,7 +162,7 @@ final class GifEncoder {
         List<ColorBox> boxes = new ArrayList<>();
         boxes.add(new ColorBox(0, samples.length));
 
-        while (boxes.size() < MAX_COLORS) {
+        while (boxes.size() < maxOpaqueColors) {
             int best = -1;
             long bestScore = -1;
 
@@ -166,7 +200,7 @@ final class GifEncoder {
         }
 
         int[] palette = new int[MAX_COLORS];
-        int paletteSize = boxes.size();
+        int paletteSize = Math.min(boxes.size(), maxOpaqueColors);
 
         for (int i = 0; i < paletteSize; i++) {
             ColorBox box = boxes.get(i);
@@ -190,11 +224,16 @@ final class GifEncoder {
         }
 
         int fill = paletteSize > 0 ? palette[paletteSize - 1] : 0;
-        for (int i = paletteSize; i < MAX_COLORS; i++) {
+        int fillEnd = hasTransparency ? TRANSPARENT_INDEX : MAX_COLORS;
+        for (int i = paletteSize; i < fillEnd; i++) {
             palette[i] = fill;
         }
 
-        byte[] indices = new byte[total];
+        if (hasTransparency) {
+            palette[TRANSPARENT_INDEX] = 0;
+        }
+
+        byte[] indices = new byte[pixels.length];
 
         // Cache nearest-color decisions at 5 bits/channel. The cache keeps
         // per-frame quantization fast without forcing the palette itself into
@@ -202,8 +241,14 @@ final class GifEncoder {
         short[] nearestCache = new short[32 * 32 * 32];
         Arrays.fill(nearestCache, (short) -1);
 
-        for (int i = 0; i < total; i++) {
+        for (int i = 0; i < pixels.length; i++) {
             int c = pixels[i];
+
+            if (hasTransparency && ((c >>> 24) & 0xFF) < 128) {
+                indices[i] = (byte) TRANSPARENT_INDEX;
+                continue;
+            }
+
             int r = (c >> 16) & 0xFF;
             int g = (c >> 8) & 0xFF;
             int b = c & 0xFF;
@@ -219,7 +264,7 @@ final class GifEncoder {
             indices[i] = (byte) nearest;
         }
 
-        return new QuantizedFrame(palette, indices);
+        return new QuantizedFrame(palette, indices, hasTransparency);
     }
 
     private int findNearestColor(
@@ -242,8 +287,6 @@ final class GifEncoder {
             int dg = g - pg;
             int db = b - pb;
 
-            // Slightly favor green fidelity because human vision is most
-            // sensitive there.
             long distance =
                     3L * dr * dr
                             + 4L * dg * dg
@@ -365,10 +408,12 @@ final class GifEncoder {
     private static final class QuantizedFrame {
         final int[] palette;
         final byte[] indices;
+        final boolean hasTransparency;
 
-        QuantizedFrame(int[] palette, byte[] indices) {
+        QuantizedFrame(int[] palette, byte[] indices, boolean hasTransparency) {
             this.palette = palette;
             this.indices = indices;
+            this.hasTransparency = hasTransparency;
         }
     }
 
