@@ -43,6 +43,7 @@ public class GifTrimActivity extends Activity {
     private String gifName = "animation.gif";
     private GifTimeline timeline;
     private Movie previewMovie;
+    private Bitmap previewBitmap;
 
     private int currentFrame;
     private int startFrame;
@@ -438,7 +439,13 @@ public class GifTrimActivity extends Activity {
                     timeline.frameTimeMs(currentFrame),
                     720);
 
+            Bitmap old = previewBitmap;
+            previewBitmap = bitmap;
             preview.setImageBitmap(bitmap);
+
+            if (old != null && old != bitmap && !old.isRecycled()) {
+                old.recycle();
+            }
         } catch (Exception e) {
             statusLabel.setText("Could not render frame: " + safeMessage(e));
         }
@@ -920,6 +927,11 @@ public class GifTrimActivity extends Activity {
         timeline = null;
         previewMovie = null;
         preview.setImageDrawable(null);
+
+        if (previewBitmap != null && !previewBitmap.isRecycled()) {
+            previewBitmap.recycle();
+        }
+        previewBitmap = null;
         frameSlider.setMax(0);
         frameSlider.setProgress(0);
         frameSlider.setEnabled(false);
@@ -971,6 +983,11 @@ public class GifTrimActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         executor.shutdownNow();
+
+        if (previewBitmap != null && !previewBitmap.isRecycled()) {
+            previewBitmap.recycle();
+        }
+        previewBitmap = null;
     }
 
     private static final class OutputTarget {
