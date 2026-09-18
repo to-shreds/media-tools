@@ -2,7 +2,7 @@ package com.jjabs.videotogif;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.PixelFormat;
+import android.graphics.ImageFormat;
 import android.graphics.Rect;
 import android.media.Image;
 import android.media.ImageReader;
@@ -72,19 +72,23 @@ final class VideoConverter {
                     ? format.getLong(MediaFormat.KEY_DURATION)
                     : 0L;
 
+            int colorStandard = format.containsKey(MediaFormat.KEY_COLOR_STANDARD)
+                    ? format.getInteger(MediaFormat.KEY_COLOR_STANDARD)
+                    : MediaFormat.COLOR_STANDARD_BT709;
+            int colorRange = format.containsKey(MediaFormat.KEY_COLOR_RANGE)
+                    ? format.getInteger(MediaFormat.KEY_COLOR_RANGE)
+                    : MediaFormat.COLOR_RANGE_LIMITED;
+
             int displayWidth = (rotation == 90 || rotation == 270) ? sourceHeight : sourceWidth;
             int displayHeight = (rotation == 90 || rotation == 270) ? sourceWidth : sourceHeight;
             int outWidth = Math.max(1, Math.min(targetWidth, displayWidth));
             int outHeight = Math.max(1, Math.round(displayHeight * (outWidth / (float) displayWidth)));
 
             final ArrayBlockingQueue<Image> images = new ArrayBlockingQueue<>(3);
-
-            // Let Android's video pipeline perform the YUV -> RGB color conversion.
-            // This avoids device-specific chroma layouts and color-matrix/range mistakes.
             imageReader = ImageReader.newInstance(
                     sourceWidth,
                     sourceHeight,
-                    PixelFormat.RGBA_8888,
+                    ImageFormat.YUV_420_888,
                     3);
 
             imageThread = new HandlerThread("gif-frame-reader");
@@ -166,6 +170,13 @@ final class VideoConverter {
                     continue;
                 }
                 if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    MediaFormat outputFormat = decoder.getOutputFormat();
+                    if (outputFormat.containsKey(MediaFormat.KEY_COLOR_STANDARD)) {
+                        colorStandard = outputFormat.getInteger(MediaFormat.KEY_COLOR_STANDARD);
+                    }
+                    if (outputFormat.containsKey(MediaFormat.KEY_COLOR_RANGE)) {
+                        colorRange = outputFormat.getInteger(MediaFormat.KEY_COLOR_RANGE);
+                    }
                     lastActivityNs = System.nanoTime();
                     continue;
                 }
@@ -188,7 +199,13 @@ final class VideoConverter {
                     }
 
                     try {
-                        Bitmap bitmap = rgbaImageToBitmap(image, rotation, outWidth, outHeight);
+                        Bitmap bitmap = yuvImageToBitmap(
+                                image,
+                                rotation,
+                                outWidth,
+                                outHeight,
+                                colorStandard,
+                                colorRange);
                         encoder.addFrame(bitmap);
                         bitmap.recycle();
                         encodedFrames++;
@@ -246,25 +263,17 @@ final class VideoConverter {
         }
     }
 
-    private static Bitmap rgbaImageToBitmap(
+    private static Bitmap yuvImageToBitmap(
             Image image,
             int rotation,
             int outWidth,
-            int outHeight) {
+            int outHeight,
+            int colorStandard,
+            int colorRange) {
 
         Image.Plane[] planes = image.getPlanes();
-        if (planes.length < 1) {
-            throw new IllegalArgumentException("Decoded RGB frame had no pixel plane.");
-        }
-
-        Image.Plane plane = planes[0];
-        ByteBuffer buffer = plane.getBuffer();
-        int base = buffer.position();
-        int pixelStride = plane.getPixelStride();
-        int rowStride = plane.getRowStride();
-
-        if (pixelStride < 4) {
-            throw new IllegalArgumentException("Unexpected RGB pixel layout.");
+        if (planes.length < 3) {
+            throw new IllegalArgumentException("Unsupported decoded YUV layout.");
         }
 
         Rect crop = image.getCropRect();
@@ -273,6 +282,42 @@ final class VideoConverter {
         int displayWidth = (rotation == 90 || rotation == 270) ? sourceHeight : sourceWidth;
         int displayHeight = (rotation == 90 || rotation == 270) ? sourceWidth : sourceHeight;
 
+        Image.Plane yPlane = planes[0];
+        Image.Plane uPlane = planes[1];
+        Image.Plane vPlane = planes[2];
+
+        ByteBuffer yBuffer = yPlane.getBuffer();
+        ByteBuffer uBuffer = uPlane.getBuffer();
+        ByteBuffer vBuffer = vPlane.getBuffer();
+
+        int yBase = yBuffer.position();
+        int uBase = uBuffer.position();
+        int vBase = vBuffer.position();
+
+        float crToR;
+        float cbToG;
+        float crToG;
+        float cbToB;
+
+        if (colorStandard == MediaFormat.COLOR_STANDARD_BT601_NTSC
+                || colorStandard == MediaFormat.COLOR_STANDARD_BT601_PAL) {
+            crToR = 1.402f;
+            cbToG = 0.344136f;
+            crToG = 0.714136f;
+            cbToB = 1.772f;
+        } else if (colorStandard == MediaFormat.COLOR_STANDARD_BT2020) {
+            crToR = 1.4746f;
+            cbToG = 0.164553f;
+            crToG = 0.571353f;
+            cbToB = 1.8814f;
+        } else {
+            crToR = 1.5748f;
+            cbToG = 0.187324f;
+            crToG = 0.468124f;
+            cbToB = 1.8556f;
+        }
+
+        boolean fullRange = colorRange == MediaFormat.COLOR_RANGE_FULL;
         int[] pixels = new int[outWidth * outHeight];
         int p = 0;
 
@@ -311,14 +356,36 @@ final class VideoConverter {
                 sx += crop.left;
                 sy += crop.top;
 
-                int offset = base + sy * rowStride + sx * pixelStride;
+                int yIndex = yBase
+                        + sy * yPlane.getRowStride()
+                        + sx * yPlane.getPixelStride();
 
-                int r = buffer.get(offset) & 0xFF;
-                int g = buffer.get(offset + 1) & 0xFF;
-                int b = buffer.get(offset + 2) & 0xFF;
-                int a = buffer.get(offset + 3) & 0xFF;
+                int chromaX = sx / 2;
+                int chromaY = sy / 2;
 
-                pixels[p++] = (a << 24) | (r << 16) | (g << 8) | b;
+                int uIndex = uBase
+                        + chromaY * uPlane.getRowStride()
+                        + chromaX * uPlane.getPixelStride();
+
+                int vIndex = vBase
+                        + chromaY * vPlane.getRowStride()
+                        + chromaX * vPlane.getPixelStride();
+
+                float y = yBuffer.get(yIndex) & 0xFF;
+                float cb = (uBuffer.get(uIndex) & 0xFF) - 128f;
+                float cr = (vBuffer.get(vIndex) & 0xFF) - 128f;
+
+                if (!fullRange) {
+                    y = (y - 16f) * (255f / 219f);
+                    cb *= (255f / 224f);
+                    cr *= (255f / 224f);
+                }
+
+                int r = clamp(Math.round(y + crToR * cr));
+                int g = clamp(Math.round(y - cbToG * cb - crToG * cr));
+                int b = clamp(Math.round(y + cbToB * cb));
+
+                pixels[p++] = 0xFF000000 | (r << 16) | (g << 8) | b;
             }
         }
 
@@ -342,5 +409,9 @@ final class VideoConverter {
             return 180;
         }
         return 270;
+    }
+
+    private static int clamp(int value) {
+        return Math.max(0, Math.min(255, value));
     }
 }
