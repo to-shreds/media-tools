@@ -172,10 +172,10 @@ final class GpuFrameRenderer {
             int rowOffset = y * rawWidth * 4;
             for (int x = 0; x < rawWidth; x++) {
                 int offset = rowOffset + x * 4;
-                int r = rgba.get(offset) & 0xFF;
-                int g = rgba.get(offset + 1) & 0xFF;
-                int b = rgba.get(offset + 2) & 0xFF;
-                int a = rgba.get(offset + 3) & 0xFF;
+                int r = rgbaBuffer.get(offset) & 0xFF;
+                int g = rgbaBuffer.get(offset + 1) & 0xFF;
+                int b = rgbaBuffer.get(offset + 2) & 0xFF;
+                int a = rgbaBuffer.get(offset + 3) & 0xFF;
                 pixelBuffer[p++] = (a << 24) | (r << 16) | (g << 8) | b;
             }
         }
