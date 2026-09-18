@@ -142,6 +142,16 @@ public class MainActivity extends Activity {
         convertButton.setOnClickListener(v -> convertSelectedVideos());
         root.addView(convertButton, fullWidth());
 
+        Button trimGifButton = new Button(this);
+        trimGifButton.setText("Trim an existing GIF");
+        trimGifButton.setAllCaps(false);
+        trimGifButton.setTextSize(16);
+        trimGifButton.setOnClickListener(v ->
+                startActivity(new Intent(this, GifTrimActivity.class)));
+        LinearLayout.LayoutParams trimParams = fullWidth();
+        trimParams.topMargin = dp(10);
+        root.addView(trimGifButton, trimParams);
+
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
         progressBar.setProgress(0);
