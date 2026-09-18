@@ -46,7 +46,19 @@ final class GifEncoder {
                 int r = (c >> 16) & 0xFF;
                 int g = (c >> 8) & 0xFF;
                 int b = c & 0xFF;
-                indices[offset++] = (byte) (((r >> 5) << 5) | ((g >> 5) << 2) | (b >> 6));
+
+                int max = Math.max(r, Math.max(g, b));
+                int min = Math.min(r, Math.min(g, b));
+
+                if (max - min <= 18) {
+                    int gray = Math.round(((r + g + b) / 3f) * 39f / 255f);
+                    indices[offset++] = (byte) (216 + gray);
+                } else {
+                    int ri = Math.round(r * 5f / 255f);
+                    int gi = Math.round(g * 5f / 255f);
+                    int bi = Math.round(b * 5f / 255f);
+                    indices[offset++] = (byte) (ri * 36 + gi * 6 + bi);
+                }
             }
         }
 
@@ -67,17 +79,26 @@ final class GifEncoder {
         writeShort(height);
 
         // Global color table present, 8-bit color resolution, 256 entries.
+        // Use a balanced 6x6x6 RGB cube plus 40 gray levels rather than 3-3-2 RGB.
         out.write(0xF7);
         out.write(0);
         out.write(0);
 
-        for (int i = 0; i < 256; i++) {
-            int r3 = (i >> 5) & 0x07;
-            int g3 = (i >> 2) & 0x07;
-            int b2 = i & 0x03;
-            out.write((r3 * 255) / 7);
-            out.write((g3 * 255) / 7);
-            out.write((b2 * 255) / 3);
+        for (int ri = 0; ri < 6; ri++) {
+            for (int gi = 0; gi < 6; gi++) {
+                for (int bi = 0; bi < 6; bi++) {
+                    out.write(Math.round(ri * 255f / 5f));
+                    out.write(Math.round(gi * 255f / 5f));
+                    out.write(Math.round(bi * 255f / 5f));
+                }
+            }
+        }
+
+        for (int i = 0; i < 40; i++) {
+            int gray = Math.round(i * 255f / 39f);
+            out.write(gray);
+            out.write(gray);
+            out.write(gray);
         }
 
         // Loop forever.
