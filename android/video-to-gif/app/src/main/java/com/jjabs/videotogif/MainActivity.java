@@ -1,14 +1,18 @@
 package com.jjabs.videotogif;
 
 import android.app.Activity;
+import android.content.ClipData;
 import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.database.Cursor;
-import android.graphics.Bitmap;
 import android.graphics.Color;
-import android.media.MediaMetadataRetriever;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.provider.DocumentsContract;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
@@ -21,16 +25,18 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final int REQUEST_PICK_VIDEO = 1001;
-    private static final int REQUEST_SAVE_GIF = 1002;
+    private static final int REQUEST_PICK_VIDEOS = 1001;
 
-    private Uri selectedVideo;
-    private String selectedName = "video";
+    private final List<InputItem> selectedVideos = new ArrayList<>();
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     private Button pickButton;
     private Button convertButton;
@@ -39,8 +45,6 @@ public class MainActivity extends Activity {
     private TextView fileLabel;
     private TextView statusLabel;
     private ProgressBar progressBar;
-
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -67,7 +71,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT));
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Pick an MP4 or WebM and turn it into a looping GIF. Everything stays on your phone.");
+        subtitle.setText("Pick one or more MP4/WebM files. GIFs save beside the originals whenever Android allows it.");
         subtitle.setTextSize(15);
         subtitle.setTextColor(Color.rgb(85, 91, 103));
         LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(
@@ -78,14 +82,14 @@ public class MainActivity extends Activity {
         root.addView(subtitle, subtitleParams);
 
         pickButton = new Button(this);
-        pickButton.setText("Choose video");
+        pickButton.setText("Choose videos");
         pickButton.setAllCaps(false);
         pickButton.setTextSize(16);
-        pickButton.setOnClickListener(v -> pickVideo());
+        pickButton.setOnClickListener(v -> pickVideos());
         root.addView(pickButton, fullWidth());
 
         fileLabel = new TextView(this);
-        fileLabel.setText("No video selected");
+        fileLabel.setText("No videos selected");
         fileLabel.setTextSize(14);
         fileLabel.setTextColor(Color.rgb(90, 96, 108));
         LinearLayout.LayoutParams fileParams = new LinearLayout.LayoutParams(
@@ -120,7 +124,7 @@ public class MainActivity extends Activity {
         root.addView(fpsSpinner, fullWidth());
 
         TextView hint = new TextView(this);
-        hint.setText("Tip: GIFs get large quickly. 480 px at 10 fps is a good default.");
+        hint.setText("480 px at 10 fps is a good default. Larger or faster GIFs can get very large.");
         hint.setTextSize(13);
         hint.setTextColor(Color.rgb(105, 111, 122));
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(
@@ -135,7 +139,7 @@ public class MainActivity extends Activity {
         convertButton.setAllCaps(false);
         convertButton.setTextSize(16);
         convertButton.setEnabled(false);
-        convertButton.setOnClickListener(v -> chooseOutputFile());
+        convertButton.setOnClickListener(v -> convertSelectedVideos());
         root.addView(convertButton, fullWidth());
 
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
@@ -176,157 +180,436 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT);
     }
 
-    private void pickVideo() {
+    private void pickVideos() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("video/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        startActivityForResult(intent, REQUEST_PICK_VIDEO);
-    }
-
-    private void chooseOutputFile() {
-        if (selectedVideo == null) {
-            return;
-        }
-        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("image/gif");
-        intent.putExtra(Intent.EXTRA_TITLE, makeOutputName(selectedName));
-        startActivityForResult(intent, REQUEST_SAVE_GIF);
+        startActivityForResult(intent, REQUEST_PICK_VIDEOS);
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+        if (requestCode != REQUEST_PICK_VIDEOS || resultCode != RESULT_OK || data == null) {
             return;
         }
 
-        Uri uri = data.getData();
+        selectedVideos.clear();
 
-        if (requestCode == REQUEST_PICK_VIDEO) {
-            selectedVideo = uri;
-            selectedName = queryDisplayName(uri);
-            try {
-                int flags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
-                getContentResolver().takePersistableUriPermission(uri, flags);
-            } catch (Exception ignored) {
+        ClipData clipData = data.getClipData();
+        if (clipData != null) {
+            for (int i = 0; i < clipData.getItemCount(); i++) {
+                addSelectedVideo(clipData.getItemAt(i).getUri(), data);
             }
-            fileLabel.setText(selectedName);
-            convertButton.setEnabled(true);
-            statusLabel.setText("");
-            progressBar.setVisibility(View.GONE);
-        } else if (requestCode == REQUEST_SAVE_GIF) {
-            int targetWidth = parseLeadingInt(widthSpinner.getSelectedItem().toString(), 480);
-            int fps = parseLeadingInt(fpsSpinner.getSelectedItem().toString(), 10);
-            convertVideo(selectedVideo, uri, targetWidth, fps);
+        } else if (data.getData() != null) {
+            addSelectedVideo(data.getData(), data);
         }
+
+        if (selectedVideos.isEmpty()) {
+            fileLabel.setText("No videos selected");
+            convertButton.setEnabled(false);
+            return;
+        }
+
+        if (selectedVideos.size() == 1) {
+            fileLabel.setText(selectedVideos.get(0).name);
+        } else {
+            fileLabel.setText(selectedVideos.size() + " videos selected");
+        }
+
+        convertButton.setText(selectedVideos.size() == 1
+                ? "Convert to GIF"
+                : "Convert " + selectedVideos.size() + " videos");
+        convertButton.setEnabled(true);
+        statusLabel.setText("");
+        progressBar.setVisibility(View.GONE);
     }
 
-    private void convertVideo(Uri inputUri, Uri outputUri, int targetWidth, int fps) {
+    private void addSelectedVideo(Uri uri, Intent sourceIntent) {
+        if (uri == null) {
+            return;
+        }
+
+        try {
+            int flags = sourceIntent.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            getContentResolver().takePersistableUriPermission(uri, flags);
+        } catch (Exception ignored) {
+        }
+
+        selectedVideos.add(new InputItem(uri, queryDisplayName(uri)));
+    }
+
+    private void convertSelectedVideos() {
+        if (selectedVideos.isEmpty()) {
+            return;
+        }
+
+        final int targetWidth = parseLeadingInt(widthSpinner.getSelectedItem().toString(), 480);
+        final int fps = parseLeadingInt(fpsSpinner.getSelectedItem().toString(), 10);
+        final List<InputItem> work = new ArrayList<>(selectedVideos);
+
         setBusy(true);
         progressBar.setProgress(0);
         progressBar.setVisibility(View.VISIBLE);
-        statusLabel.setText("Reading video...");
+        statusLabel.setText("Starting batch...");
 
         executor.execute(() -> {
-            MediaMetadataRetriever retriever = new MediaMetadataRetriever();
-            try {
-                retriever.setDataSource(this, inputUri);
+            int successes = 0;
+            int failures = 0;
+            int fallbackSaves = 0;
 
-                long durationMs = parseLong(retriever.extractMetadata(
-                        MediaMetadataRetriever.METADATA_KEY_DURATION), 0);
-                int sourceWidth = (int) parseLong(retriever.extractMetadata(
-                        MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH), 0);
-                int sourceHeight = (int) parseLong(retriever.extractMetadata(
-                        MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT), 0);
-                int rotation = (int) parseLong(retriever.extractMetadata(
-                        MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION), 0);
+            for (int index = 0; index < work.size(); index++) {
+                InputItem item = work.get(index);
+                OutputTarget target = null;
 
-                if (durationMs <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
-                    throw new IllegalArgumentException("Could not read the video dimensions or duration.");
-                }
-
-                if (rotation == 90 || rotation == 270) {
-                    int swap = sourceWidth;
-                    sourceWidth = sourceHeight;
-                    sourceHeight = swap;
-                }
-
-                int outWidth = Math.min(targetWidth, sourceWidth);
-                int outHeight = Math.max(1, Math.round(sourceHeight * (outWidth / (float) sourceWidth)));
-
-                long durationUs = durationMs * 1000L;
-                long stepUs = Math.max(1L, 1_000_000L / fps);
-                int frameCount = Math.max(1, (int) ((durationUs + stepUs - 1) / stepUs));
-                int delayCs = Math.max(1, Math.round(100f / fps));
-
-                ContentResolver resolver = getContentResolver();
-                try (OutputStream output = resolver.openOutputStream(outputUri, "w")) {
-                    if (output == null) {
-                        throw new IllegalStateException("Could not open the output file.");
+                try {
+                    target = createOutputTarget(item);
+                    if (target == null || target.uri == null) {
+                        throw new IllegalStateException("Could not create an output file.");
                     }
 
-                    GifEncoder encoder = new GifEncoder(output, outWidth, outHeight, delayCs);
-                    int encoded = 0;
+                    if (target.fallback) {
+                        fallbackSaves++;
+                    }
 
-                    for (int i = 0; i < frameCount; i++) {
-                        long timeUs = Math.min(i * stepUs, Math.max(0, durationUs - 1));
-                        Bitmap frame = retriever.getScaledFrameAtTime(
-                                timeUs,
-                                MediaMetadataRetriever.OPTION_CLOSEST,
-                                outWidth,
-                                outHeight);
+                    int itemNumber = index + 1;
+                    int total = work.size();
+                    OutputTarget finalTarget = target;
 
-                        if (frame != null) {
-                            encoder.addFrame(frame);
-                            frame.recycle();
-                            encoded++;
+                    runOnUiThread(() -> statusLabel.setText(
+                            String.format(Locale.US,
+                                    "%d of %d: %s",
+                                    itemNumber,
+                                    total,
+                                    item.name)));
+
+                    try (OutputStream output = getContentResolver().openOutputStream(target.uri, "w")) {
+                        if (output == null) {
+                            throw new IllegalStateException("Could not open the GIF output.");
                         }
 
-                        int progress = Math.min(100, Math.round(((i + 1) * 100f) / frameCount));
-                        int shownFrame = i + 1;
-                        runOnUiThread(() -> {
-                            progressBar.setProgress(progress);
-                            statusLabel.setText(String.format(Locale.US,
-                                    "Converting... %d%%  (%d/%d frames)",
-                                    progress, shownFrame, frameCount));
-                        });
+                        VideoConverter.convert(
+                                this,
+                                item.uri,
+                                output,
+                                targetWidth,
+                                fps,
+                                itemPercent -> {
+                                    int overall = Math.round(
+                                            ((itemNumber - 1) + (itemPercent / 100f))
+                                                    * 100f / total);
+                                    runOnUiThread(() -> {
+                                        progressBar.setProgress(overall);
+                                        statusLabel.setText(String.format(
+                                                Locale.US,
+                                                "%d of %d: %s  %d%%",
+                                                itemNumber,
+                                                total,
+                                                item.name,
+                                                itemPercent));
+                                    });
+                                });
                     }
 
-                    if (encoded == 0) {
-                        throw new IllegalStateException("Android could not decode any frames from this video.");
+                    completeOutput(finalTarget);
+                    successes++;
+                } catch (Exception e) {
+                    failures++;
+                    if (target != null && target.uri != null) {
+                        deleteQuietly(target.uri);
                     }
 
-                    encoder.finish();
-                }
-
-                runOnUiThread(() -> {
-                    progressBar.setProgress(100);
-                    statusLabel.setText("Done. GIF saved.");
-                    setBusy(false);
-                    Toast.makeText(this, "GIF saved", Toast.LENGTH_SHORT).show();
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> {
-                    progressBar.setVisibility(View.GONE);
-                    statusLabel.setText("Conversion failed: " + safeMessage(e));
-                    setBusy(false);
-                });
-            } finally {
-                try {
-                    retriever.release();
-                } catch (Exception ignored) {
+                    int itemNumber = index + 1;
+                    int total = work.size();
+                    String message = safeMessage(e);
+                    runOnUiThread(() -> statusLabel.setText(String.format(
+                            Locale.US,
+                            "%d of %d failed: %s (%s)",
+                            itemNumber,
+                            total,
+                            item.name,
+                            message)));
                 }
             }
+
+            int finalSuccesses = successes;
+            int finalFailures = failures;
+            int finalFallbackSaves = fallbackSaves;
+
+            runOnUiThread(() -> {
+                progressBar.setProgress(100);
+                setBusy(false);
+
+                StringBuilder summary = new StringBuilder();
+                summary.append(finalSuccesses)
+                        .append(finalSuccesses == 1 ? " GIF saved" : " GIFs saved");
+
+                if (finalFailures > 0) {
+                    summary.append("; ")
+                            .append(finalFailures)
+                            .append(finalFailures == 1 ? " failed" : " failed");
+                }
+
+                if (finalFallbackSaves > 0) {
+                    summary.append(". ")
+                            .append(finalFallbackSaves)
+                            .append(finalFallbackSaves == 1
+                                    ? " had to save in Downloads/VideoToGif"
+                                    : " had to save in Downloads/VideoToGif");
+                }
+
+                statusLabel.setText(summary.toString());
+                Toast.makeText(this, summary.toString(), Toast.LENGTH_LONG).show();
+            });
         });
+    }
+
+    private OutputTarget createOutputTarget(InputItem item) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            String relativePath = resolveRelativePath(item.uri);
+            String volumeName = resolveVolumeName(item.uri);
+
+            if (relativePath != null) {
+                Uri sameFolder = insertGif(
+                        volumeName,
+                        relativePath,
+                        makeOutputName(item.name));
+                if (sameFolder != null) {
+                    return new OutputTarget(sameFolder, false, true);
+                }
+            }
+
+            Uri fallback = insertGif(
+                    MediaStore.VOLUME_EXTERNAL_PRIMARY,
+                    "Download/VideoToGif/",
+                    makeOutputName(item.name));
+            if (fallback != null) {
+                return new OutputTarget(fallback, true, true);
+            }
+        }
+
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, makeOutputName(item.name));
+        values.put(MediaStore.Images.Media.MIME_TYPE, "image/gif");
+        Uri uri = getContentResolver().insert(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                values);
+        return uri == null ? null : new OutputTarget(uri, true, false);
+    }
+
+    private Uri insertGif(String volumeName, String relativePath, String displayName) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return null;
+        }
+
+        String volume = volumeName;
+        if (volume == null || volume.isBlank()) {
+            volume = MediaStore.VOLUME_EXTERNAL_PRIMARY;
+        }
+
+        try {
+            Set<String> available = MediaStore.getExternalVolumeNames(this);
+            if (!MediaStore.VOLUME_EXTERNAL_PRIMARY.equals(volume)) {
+                String matched = null;
+                for (String candidate : available) {
+                    if (candidate.equalsIgnoreCase(volume)) {
+                        matched = candidate;
+                        break;
+                    }
+                }
+                if (matched == null) {
+                    volume = MediaStore.VOLUME_EXTERNAL_PRIMARY;
+                } else {
+                    volume = matched;
+                }
+            }
+
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.Images.Media.DISPLAY_NAME, displayName);
+            values.put(MediaStore.Images.Media.MIME_TYPE, "image/gif");
+            values.put(MediaStore.Images.Media.RELATIVE_PATH, normalizeRelativePath(relativePath));
+            values.put(MediaStore.Images.Media.IS_PENDING, 1);
+
+            return getContentResolver().insert(
+                    MediaStore.Images.Media.getContentUri(volume),
+                    values);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void completeOutput(OutputTarget target) {
+        if (target == null || !target.pending || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return;
+        }
+
+        try {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.Images.Media.IS_PENDING, 0);
+            getContentResolver().update(target.uri, values, null, null);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String resolveRelativePath(Uri uri) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return null;
+        }
+
+        String direct = queryStringColumn(uri, MediaStore.MediaColumns.RELATIVE_PATH);
+        if (direct != null) {
+            return normalizeRelativePath(direct);
+        }
+
+        String authority = uri.getAuthority();
+
+        if ("com.android.providers.externalstorage.documents".equals(authority)
+                && DocumentsContract.isDocumentUri(this, uri)) {
+            try {
+                String id = DocumentsContract.getDocumentId(uri);
+                int colon = id.indexOf(':');
+                String path = colon >= 0 ? id.substring(colon + 1) : id;
+                int slash = path.lastIndexOf('/');
+                if (slash < 0) {
+                    return "";
+                }
+                return normalizeRelativePath(path.substring(0, slash + 1));
+            } catch (Exception ignored) {
+            }
+        }
+
+        Uri mediaUri = resolveMediaStoreUri(uri);
+        if (mediaUri != null) {
+            String path = queryStringColumn(mediaUri, MediaStore.MediaColumns.RELATIVE_PATH);
+            if (path != null) {
+                return normalizeRelativePath(path);
+            }
+        }
+
+        return null;
+    }
+
+    private String resolveVolumeName(Uri uri) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return null;
+        }
+
+        String direct = queryStringColumn(uri, MediaStore.MediaColumns.VOLUME_NAME);
+        if (direct != null) {
+            return direct;
+        }
+
+        String authority = uri.getAuthority();
+
+        if ("com.android.providers.externalstorage.documents".equals(authority)
+                && DocumentsContract.isDocumentUri(this, uri)) {
+            try {
+                String id = DocumentsContract.getDocumentId(uri);
+                int colon = id.indexOf(':');
+                String volume = colon >= 0 ? id.substring(0, colon) : id;
+                if ("primary".equalsIgnoreCase(volume)) {
+                    return MediaStore.VOLUME_EXTERNAL_PRIMARY;
+                }
+                return volume.toLowerCase(Locale.US);
+            } catch (Exception ignored) {
+            }
+        }
+
+        Uri mediaUri = resolveMediaStoreUri(uri);
+        if (mediaUri != null) {
+            String volume = queryStringColumn(mediaUri, MediaStore.MediaColumns.VOLUME_NAME);
+            if (volume != null) {
+                return volume;
+            }
+        }
+
+        return MediaStore.VOLUME_EXTERNAL_PRIMARY;
+    }
+
+    private Uri resolveMediaStoreUri(Uri uri) {
+        String authority = uri.getAuthority();
+        if (!"com.android.providers.media.documents".equals(authority)
+                || !DocumentsContract.isDocumentUri(this, uri)) {
+            return null;
+        }
+
+        try {
+            String id = DocumentsContract.getDocumentId(uri);
+            String[] parts = id.split(":", 2);
+            if (parts.length != 2) {
+                return null;
+            }
+
+            long rowId = Long.parseLong(parts[1]);
+            Uri base;
+
+            switch (parts[0]) {
+                case "image":
+                    base = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+                    break;
+                case "audio":
+                    base = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+                    break;
+                case "video":
+                default:
+                    base = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+                    break;
+            }
+
+            return ContentUris.withAppendedId(base, rowId);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String queryStringColumn(Uri uri, String column) {
+        try (Cursor cursor = getContentResolver().query(
+                uri,
+                new String[]{column},
+                null,
+                null,
+                null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(column);
+                if (index >= 0 && !cursor.isNull(index)) {
+                    String value = cursor.getString(index);
+                    return value == null || value.isBlank() ? null : value;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private String normalizeRelativePath(String path) {
+        if (path == null || path.isBlank()) {
+            return "";
+        }
+
+        String normalized = path.replace('\\', '/');
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        if (!normalized.endsWith("/")) {
+            normalized += "/";
+        }
+        return normalized;
+    }
+
+    private void deleteQuietly(Uri uri) {
+        try {
+            getContentResolver().delete(uri, null, null);
+        } catch (Exception ignored) {
+        }
     }
 
     private void setBusy(boolean busy) {
         pickButton.setEnabled(!busy);
         widthSpinner.setEnabled(!busy);
         fpsSpinner.setEnabled(!busy);
-        convertButton.setEnabled(!busy && selectedVideo != null);
+        convertButton.setEnabled(!busy && !selectedVideos.isEmpty());
     }
 
     private String queryDisplayName(Uri uri) {
@@ -364,14 +647,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private long parseLong(String text, long fallback) {
-        try {
-            return text == null ? fallback : Long.parseLong(text);
-        } catch (Exception e) {
-            return fallback;
-        }
-    }
-
     private String safeMessage(Exception e) {
         String message = e.getMessage();
         return (message == null || message.isBlank())
@@ -387,5 +662,27 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         executor.shutdownNow();
+    }
+
+    private static final class InputItem {
+        final Uri uri;
+        final String name;
+
+        InputItem(Uri uri, String name) {
+            this.uri = uri;
+            this.name = name;
+        }
+    }
+
+    private static final class OutputTarget {
+        final Uri uri;
+        final boolean fallback;
+        final boolean pending;
+
+        OutputTarget(Uri uri, boolean fallback, boolean pending) {
+            this.uri = uri;
+            this.fallback = fallback;
+            this.pending = pending;
+        }
     }
 }
