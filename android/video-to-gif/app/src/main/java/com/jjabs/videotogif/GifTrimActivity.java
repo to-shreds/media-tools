@@ -262,13 +262,16 @@ public class GifTrimActivity extends Activity {
     }
 
     private void pickGif() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        // ACTION_GET_CONTENT deliberately avoids forcing the user through
+        // DocumentsUI/DocumentsProvider. A real file-manager app such as
+        // Samsung My Files can satisfy this intent and return any readable URI
+        // it exposes, even when that file never appears in OPEN_DOCUMENT.
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.setType("*/*");
-        intent.addFlags(
-                Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        startActivityForResult(intent, REQUEST_PICK_GIF);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+        Intent chooser = Intent.createChooser(intent, "Choose a GIF");
+        startActivityForResult(chooser, REQUEST_PICK_GIF);
     }
 
     @Override
