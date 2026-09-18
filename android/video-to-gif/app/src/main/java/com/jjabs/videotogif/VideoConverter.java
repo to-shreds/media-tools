@@ -2,7 +2,7 @@ package com.jjabs.videotogif;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.ImageFormat;
+import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.media.Image;
 import android.media.ImageReader;
@@ -78,10 +78,13 @@ final class VideoConverter {
             int outHeight = Math.max(1, Math.round(displayHeight * (outWidth / (float) displayWidth)));
 
             final ArrayBlockingQueue<Image> images = new ArrayBlockingQueue<>(3);
+
+            // Let Android's video pipeline perform the YUV -> RGB color conversion.
+            // This avoids device-specific chroma layouts and color-matrix/range mistakes.
             imageReader = ImageReader.newInstance(
                     sourceWidth,
                     sourceHeight,
-                    ImageFormat.YUV_420_888,
+                    PixelFormat.RGBA_8888,
                     3);
 
             imageThread = new HandlerThread("gif-frame-reader");
@@ -185,7 +188,7 @@ final class VideoConverter {
                     }
 
                     try {
-                        Bitmap bitmap = imageToBitmap(image, rotation, outWidth, outHeight);
+                        Bitmap bitmap = rgbaImageToBitmap(image, rotation, outWidth, outHeight);
                         encoder.addFrame(bitmap);
                         bitmap.recycle();
                         encodedFrames++;
@@ -243,15 +246,25 @@ final class VideoConverter {
         }
     }
 
-    private static Bitmap imageToBitmap(
+    private static Bitmap rgbaImageToBitmap(
             Image image,
             int rotation,
             int outWidth,
             int outHeight) {
 
         Image.Plane[] planes = image.getPlanes();
-        if (planes.length < 3) {
-            throw new IllegalArgumentException("Unsupported decoded image format.");
+        if (planes.length < 1) {
+            throw new IllegalArgumentException("Decoded RGB frame had no pixel plane.");
+        }
+
+        Image.Plane plane = planes[0];
+        ByteBuffer buffer = plane.getBuffer();
+        int base = buffer.position();
+        int pixelStride = plane.getPixelStride();
+        int rowStride = plane.getRowStride();
+
+        if (pixelStride < 4) {
+            throw new IllegalArgumentException("Unexpected RGB pixel layout.");
         }
 
         Rect crop = image.getCropRect();
@@ -259,18 +272,6 @@ final class VideoConverter {
         int sourceHeight = crop.height();
         int displayWidth = (rotation == 90 || rotation == 270) ? sourceHeight : sourceWidth;
         int displayHeight = (rotation == 90 || rotation == 270) ? sourceWidth : sourceHeight;
-
-        Image.Plane yPlane = planes[0];
-        Image.Plane uPlane = planes[1];
-        Image.Plane vPlane = planes[2];
-
-        ByteBuffer yBuffer = yPlane.getBuffer();
-        ByteBuffer uBuffer = uPlane.getBuffer();
-        ByteBuffer vBuffer = vPlane.getBuffer();
-
-        int yBase = yBuffer.position();
-        int uBase = uBuffer.position();
-        int vBase = vBuffer.position();
 
         int[] pixels = new int[outWidth * outHeight];
         int p = 0;
@@ -310,30 +311,14 @@ final class VideoConverter {
                 sx += crop.left;
                 sy += crop.top;
 
-                int yIndex = yBase
-                        + sy * yPlane.getRowStride()
-                        + sx * yPlane.getPixelStride();
+                int offset = base + sy * rowStride + sx * pixelStride;
 
-                int chromaX = sx / 2;
-                int chromaY = sy / 2;
+                int r = buffer.get(offset) & 0xFF;
+                int g = buffer.get(offset + 1) & 0xFF;
+                int b = buffer.get(offset + 2) & 0xFF;
+                int a = buffer.get(offset + 3) & 0xFF;
 
-                int uIndex = uBase
-                        + chromaY * uPlane.getRowStride()
-                        + chromaX * uPlane.getPixelStride();
-
-                int vIndex = vBase
-                        + chromaY * vPlane.getRowStride()
-                        + chromaX * vPlane.getPixelStride();
-
-                int y = yBuffer.get(yIndex) & 0xFF;
-                int u = (uBuffer.get(uIndex) & 0xFF) - 128;
-                int v = (vBuffer.get(vIndex) & 0xFF) - 128;
-
-                int r = clamp(Math.round(y + 1.402f * v));
-                int g = clamp(Math.round(y - 0.344136f * u - 0.714136f * v));
-                int b = clamp(Math.round(y + 1.772f * u));
-
-                pixels[p++] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                pixels[p++] = (a << 24) | (r << 16) | (g << 8) | b;
             }
         }
 
@@ -357,9 +342,5 @@ final class VideoConverter {
             return 180;
         }
         return 270;
-    }
-
-    private static int clamp(int value) {
-        return Math.max(0, Math.min(255, value));
     }
 }
