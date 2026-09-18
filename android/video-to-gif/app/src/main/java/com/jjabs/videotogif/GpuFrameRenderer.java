@@ -67,6 +67,8 @@ final class GpuFrameRenderer {
     private final Semaphore frameAvailable = new Semaphore(0);
     private final float[] texMatrix = new float[16];
     private final FloatBuffer vertexBuffer;
+    private final ByteBuffer rgbaBuffer;
+    private final int[] pixelBuffer;
 
     GpuFrameRenderer(
             int sourceWidth,
@@ -92,6 +94,11 @@ final class GpuFrameRenderer {
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer();
         vertexBuffer.put(VERTICES).position(0);
+
+        rgbaBuffer = ByteBuffer
+                .allocateDirect(rawWidth * rawHeight * 4)
+                .order(ByteOrder.nativeOrder());
+        pixelBuffer = new int[rawWidth * rawHeight];
 
         initEgl();
         initGl();
@@ -146,9 +153,7 @@ final class GpuFrameRenderer {
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
         checkGl("draw frame");
 
-        ByteBuffer rgba = ByteBuffer
-                .allocateDirect(rawWidth * rawHeight * 4)
-                .order(ByteOrder.nativeOrder());
+        rgbaBuffer.clear();
 
         GLES20.glReadPixels(
                 0,
@@ -157,10 +162,9 @@ final class GpuFrameRenderer {
                 rawHeight,
                 GLES20.GL_RGBA,
                 GLES20.GL_UNSIGNED_BYTE,
-                rgba);
+                rgbaBuffer);
         checkGl("read frame");
 
-        int[] pixels = new int[rawWidth * rawHeight];
         int p = 0;
 
         // glReadPixels is bottom-up relative to Android Bitmap coordinates.
@@ -172,7 +176,7 @@ final class GpuFrameRenderer {
                 int g = rgba.get(offset + 1) & 0xFF;
                 int b = rgba.get(offset + 2) & 0xFF;
                 int a = rgba.get(offset + 3) & 0xFF;
-                pixels[p++] = (a << 24) | (r << 16) | (g << 8) | b;
+                pixelBuffer[p++] = (a << 24) | (r << 16) | (g << 8) | b;
             }
         }
 
@@ -180,7 +184,7 @@ final class GpuFrameRenderer {
                 rawWidth,
                 rawHeight,
                 Bitmap.Config.ARGB_8888);
-        raw.setPixels(pixels, 0, rawWidth, 0, 0, rawWidth, rawHeight);
+        raw.setPixels(pixelBuffer, 0, rawWidth, 0, 0, rawWidth, rawHeight);
 
         if (rotation == 0) {
             return raw;
