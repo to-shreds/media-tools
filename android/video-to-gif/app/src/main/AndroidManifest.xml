@@ -8,6 +8,9 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
+            android:name=".GifToMp4Activity"
+            android:exported="false" />
+        <activity
             android:name=".GifTrimActivity"
             android:exported="false" />
         <activity
