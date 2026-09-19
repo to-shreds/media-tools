@@ -30,6 +30,7 @@ final class VideoConverter {
         MediaExtractor extractor = new MediaExtractor();
         MediaCodec decoder = null;
         GpuFrameRenderer renderer = null;
+        Bitmap pendingBitmap = null;
 
         try {
             extractor.setDataSource(context, inputUri, null);
@@ -100,9 +101,14 @@ final class VideoConverter {
             boolean inputDone = false;
             boolean outputDone = false;
 
-            long captureIntervalUs = Math.max(1L, 1_000_000L / fps);
+            long captureIntervalUs = Math.max(1L, Math.round(1_000_000d / fps));
             long nextCaptureUs = 0L;
             long lastActivityNs = System.nanoTime();
+
+            long firstCapturedPtsUs = -1L;
+            long pendingPtsUs = -1L;
+            int writtenTimelineCs = 0;
+            int capturedFrames = 0;
             int encodedFrames = 0;
 
             while (!outputDone) {
@@ -171,20 +177,37 @@ final class VideoConverter {
                 boolean capture =
                         !codecConfig
                                 && info.presentationTimeUs >= nextCaptureUs
-                                && (!endOfStream || info.presentationTimeUs > 0 || encodedFrames == 0);
+                                && (!endOfStream
+                                || info.presentationTimeUs > 0
+                                || capturedFrames == 0);
 
                 decoder.releaseOutputBuffer(outputIndex, capture);
                 lastActivityNs = System.nanoTime();
 
                 if (capture) {
-                    Bitmap bitmap = renderer.awaitAndReadFrame();
+                    Bitmap currentBitmap = renderer.awaitAndReadFrame();
+                    long currentPtsUs = Math.max(0L, info.presentationTimeUs);
 
-                    try {
-                        encoder.addFrame(bitmap);
-                        encodedFrames++;
-                    } finally {
-                        bitmap.recycle();
+                    if (firstCapturedPtsUs < 0) {
+                        firstCapturedPtsUs = currentPtsUs;
                     }
+
+                    if (pendingBitmap != null) {
+                        int targetEndCs = (int) Math.round(
+                                (currentPtsUs - firstCapturedPtsUs) / 10_000d);
+                        int delayCs = Math.max(1, targetEndCs - writtenTimelineCs);
+
+                        encoder.addFrame(pendingBitmap, delayCs);
+                        writtenTimelineCs += delayCs;
+                        encodedFrames++;
+
+                        pendingBitmap.recycle();
+                        pendingBitmap = null;
+                    }
+
+                    pendingBitmap = currentBitmap;
+                    pendingPtsUs = currentPtsUs;
+                    capturedFrames++;
 
                     do {
                         nextCaptureUs += captureIntervalUs;
@@ -207,6 +230,26 @@ final class VideoConverter {
                 }
             }
 
+            if (pendingBitmap != null) {
+                long nominalEndUs = pendingPtsUs + captureIntervalUs;
+                long finalEndUs = durationUs > pendingPtsUs
+                        ? durationUs
+                        : nominalEndUs;
+
+                int targetEndCs = firstCapturedPtsUs >= 0
+                        ? (int) Math.round(
+                                (finalEndUs - firstCapturedPtsUs) / 10_000d)
+                        : writtenTimelineCs + 1;
+
+                int delayCs = Math.max(1, targetEndCs - writtenTimelineCs);
+
+                encoder.addFrame(pendingBitmap, delayCs);
+                encodedFrames++;
+
+                pendingBitmap.recycle();
+                pendingBitmap = null;
+            }
+
             if (encodedFrames == 0) {
                 throw new IllegalStateException(
                         "Android decoded no usable video frames.");
@@ -215,6 +258,10 @@ final class VideoConverter {
             encoder.finish();
             progressListener.onProgress(100);
         } finally {
+            if (pendingBitmap != null && !pendingBitmap.isRecycled()) {
+                pendingBitmap.recycle();
+            }
+
             if (decoder != null) {
                 try {
                     decoder.stop();
