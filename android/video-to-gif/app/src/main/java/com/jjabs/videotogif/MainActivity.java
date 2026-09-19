@@ -152,6 +152,16 @@ public class MainActivity extends Activity {
         trimParams.topMargin = dp(10);
         root.addView(trimGifButton, trimParams);
 
+        Button gifToMp4Button = new Button(this);
+        gifToMp4Button.setText("Convert GIF to MP4");
+        gifToMp4Button.setAllCaps(false);
+        gifToMp4Button.setTextSize(16);
+        gifToMp4Button.setOnClickListener(v ->
+                startActivity(new Intent(this, GifToMp4Activity.class)));
+        LinearLayout.LayoutParams mp4Params = fullWidth();
+        mp4Params.topMargin = dp(10);
+        root.addView(gifToMp4Button, mp4Params);
+
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
         progressBar.setProgress(0);
