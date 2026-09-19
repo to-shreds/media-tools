@@ -117,14 +117,14 @@ public class MainActivity extends Activity {
         root.addView(fpsLabel, fpsLabelParams);
 
         fpsSpinner = new Spinner(this);
-        String[] rates = {"6 fps", "8 fps", "10 fps", "12 fps", "15 fps"};
+        String[] rates = {"5 fps", "10 fps", "15 fps", "20 fps", "25 fps", "30 fps", "35 fps", "40 fps", "45 fps", "50 fps", "55 fps", "60 fps"};
         fpsSpinner.setAdapter(new ArrayAdapter<>(this,
                 android.R.layout.simple_spinner_dropdown_item, rates));
-        fpsSpinner.setSelection(2);
+        fpsSpinner.setSelection(1);
         root.addView(fpsSpinner, fullWidth());
 
         TextView hint = new TextView(this);
-        hint.setText("480 px at 10 fps is a good default. Larger or faster GIFs can get very large.");
+        hint.setText("480 px at 10 fps is a good default. Higher frame rates can make GIFs dramatically larger.");
         hint.setTextSize(13);
         hint.setTextColor(Color.rgb(105, 111, 122));
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(
